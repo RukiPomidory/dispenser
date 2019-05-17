@@ -276,13 +276,12 @@ void drawControlWindow(byte mode)
         u8g2.setCursor(98, 58);
         u8g2.print("выход");
 
-        D_LN("SOUND");
     }
     else
     {
         if (prevTimeLeft >= 0)
         {
-            tone(BUZZER, 300, 100);
+            tone(BUZZER, 600, 100);
         }
         
         u8g2.setCursor(4, 36);
@@ -355,6 +354,7 @@ void checkRelay()
     if (endOfWork)
     {
         running = false;
+        redrawRequired = true;
     }
 }
 
