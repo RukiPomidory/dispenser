@@ -1,5 +1,7 @@
 #include <U8g2lib.h>
 #include <Keypad.h>
+#include <HX711.h>
+#include <EEPROM.h>
 
 struct Relay
 {
@@ -11,11 +13,22 @@ struct Relay
         startTime = 0;
         stopTime = 0;
     }
-    
+
+    // Время включения реле по внутреннему таймеру ардуино
     unsigned long startTime;
+    // Аналогично время выключения
     unsigned long stopTime;
+
+    // Состояние - активировано ли сейчас реле
     bool enabled;
+    // isReady = true говорит о том, 
+    // что реле еще только готовится включиться или уже включено
     bool isReady;
+
+    // manual = true - реле управляется вручную (3 режим)
+    bool manual;
+
+    // Непосредственно пин, к которому подключено реле
     int pin;
 };
 
@@ -66,6 +79,9 @@ const bool relayTestRequired = false;
 #define RELAY7  37
 #define RELAY8  38
 
+#define SCALE_DT 49
+#define SCALE_CLK 48
+
 Relay relays[8] = 
 {
     Relay(RELAY1),
@@ -89,9 +105,11 @@ unsigned long start;
 
 // Номер текущего окна
 int currentWindowId = 0;
-// 0 - Выбор режима
+// -1 - Автоматический или неавтоматический режим
+// 0 - Выбор режима (1-4)
 // 1 - выбор времени в режиме 1 и 2
-// 
+// 2 - режим ручного управление
+// 3 - окно выбора работы с весами
 
 // Режим от 1 до 4.
 // Если mode == 0, все отключено
@@ -110,6 +128,10 @@ bool running = false;
 // Нужно для оптимизации вывода оставшегося времени на дисплей
 int prevTimeLeft = 0;
 
+// Параметр калибровки тензодатчика
+float scaleParameter;
+
+// Последние индексы пикселей дисплея
 const int width = 127;
 const int height = 63;
 
@@ -123,21 +145,55 @@ char keys[ROWS][COLS] = {
 byte rowPins[ROWS] = {11,10, 9, 8}; 
 byte colPins[COLS] = {7, 6, 5, 4}; 
 
+// Клавиатура 4x4
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 // Создаём объект u8g2 для работы с дисплеем, указывая номер вывода CS для аппаратной шины SPI
 U8G2_ST7920_128X64_F_HW_SPI u8g2(U8G2_R0, 10);
 
+// Объект весов на тензодатчике и преобразователе hx711
+HX711 scale;
+
+void printDataTime()
+{
+    u8g2.print("21:10  17.05.19");
+}
+
+int getTimeLeft()
+{
+    unsigned long lapsed = millis() - start;
+    lapsed /= 1000; // Убираем миллисекунды
+    return userTimer * 60 - lapsed;
+}
 
 void drawCap()
 {
     u8g2.setFont(u8g2_font_profont11_tn);
     u8g2.setCursor(36, 7);
-    u8g2.print("21:10  17.05.19");
+    printDataTime();
     u8g2.drawLine(0, 8, width, 8);
     
 //    u8g2.drawLine(width / 2, 0, width / 2, height);
 //    u8g2.drawLine(width / 2 + 1, 0, width / 2 + 1, height);
+}
+
+void drawModeIcon()
+{
+    // Иконка "режим"
+    u8g2.drawRFrame(72, 14, 50, 23, 5);
+    u8g2.setFont(u8g2_font_8x13_t_cyrillic);
+    u8g2.setCursor(77, 28);
+    u8g2.print("Режим");
+
+    u8g2.setFont(u8g2_font_t0_16_me);
+    u8g2.setCursor(92, 41);
+    u8g2.print(mode);
+
+}
+
+void drawDialogWindow()
+{
+    
 }
 
 void drawStartWindow()
@@ -178,17 +234,7 @@ void drawSelectTimeWindow(byte mode)
     u8g2.clearBuffer();
     
     drawCap();
-    
-    {   // Иконка "режим"
-        u8g2.drawRFrame(72, 14, 50, 23, 5);
-        u8g2.setFont(u8g2_font_8x13_t_cyrillic);
-        u8g2.setCursor(77, 28);
-        u8g2.print("Режим");
-    
-        u8g2.setFont(u8g2_font_t0_16_me);
-        u8g2.setCursor(92, 41);
-        u8g2.print(mode);
-    }
+    drawModeIcon();
 
     u8g2.setFont(u8g2_font_haxrcorp4089_t_cyrillic );
     u8g2.setCursor(14, 19);
@@ -224,31 +270,14 @@ void drawSelectTimeWindow(byte mode)
     u8g2.sendBuffer();
 }
 
-int getTimeLeft()
-{
-    unsigned long lapsed = millis() - start;
-    lapsed /= 1000; // Убираем миллисекунды
-    return userTimer * 60 - lapsed;
-}
-
 void drawControlWindow(byte mode)
 {
     u8g2.clearBuffer();
     
     drawCap();
+    drawModeIcon();
 
-    {   // Иконка "режим"
-        u8g2.drawRFrame(72, 14, 50, 23, 5);
-        u8g2.setFont(u8g2_font_8x13_t_cyrillic);
-        u8g2.setCursor(77, 28);
-        u8g2.print("Режим");
-    
-        u8g2.setFont(u8g2_font_t0_16_me);
-        u8g2.setCursor(92, 41);
-        u8g2.print(mode);
-    }
-
-    u8g2.setFont(u8g2_font_haxrcorp4089_t_cyrillic );
+    u8g2.setFont(u8g2_font_haxrcorp4089_t_cyrillic);
     u8g2.setCursor(3, 20);
     u8g2.print("Время работы:");
     
@@ -309,6 +338,116 @@ void drawControlWindow(byte mode)
     u8g2.sendBuffer();
 }
 
+void drawManualWindow()
+{
+    u8g2.clearBuffer();
+    
+    drawCap();
+    drawModeIcon();
+
+    u8g2.setFont(u8g2_font_haxrcorp4089_t_cyrillic);
+    u8g2.setCursor(4, 20);
+
+    if (running)
+    {
+        u8g2.print("Для остановки");
+    }
+    else
+    {
+        u8g2.print("Для запуска");
+    }
+    
+    u8g2.setCursor(4, 32);
+    u8g2.print("нажмите");
+    u8g2.setCursor(54, 32);
+    u8g2.print("C");
+    u8g2.drawRFrame(50, 22, 13, 13, 3);
+
+    int defaultPosition = 25;
+
+    u8g2.setCursor(defaultPosition, 56);
+    u8g2.print("Реле");
+    for (int i = 0; i < 4; i++)
+    {
+        bool selected = relays[mode3Relays[i]].enabled;
+        u8g2.setDrawColor(1);
+        
+        if (selected)
+        {
+            u8g2.drawDisc(defaultPosition + 32 + i*12, 52, 5, U8G2_DRAW_ALL);
+            u8g2.setDrawColor(0);
+        }
+        else 
+        {
+            u8g2.drawCircle(defaultPosition + 32 + i*12, 52, 5, U8G2_DRAW_ALL);
+        }
+
+        int x = defaultPosition + 30 + i*12;
+        int number = mode3Relays[i] + 1;
+
+        // Смещаем расположение цифры 1, 
+        // потому что изначально она стоит криво
+        // из-за толщины символа в 2 пикселя
+        if (1 == number)
+        {
+            x++;
+        }
+
+        
+        u8g2.setCursor(x, 56);
+        u8g2.print(number);
+        
+//        u8g2.drawRFrame(34 + i*12 - 5, 46, 13, 13, 3);
+    }
+    u8g2.setDrawColor(1);
+
+    u8g2.sendBuffer();
+}
+
+void drawCalibrationQuestion()
+{
+    u8g2.clearBuffer();
+    drawCap();
+    drawModeIcon();
+
+    u8g2.setFont(u8g2_font_haxrcorp4089_t_cyrillic);
+
+//    float 
+//    u8g2.setCursor(4, 20);
+
+
+    u8g2.setCursor(12, 56);
+    u8g2.print("калибровка");
+    u8g2.drawRFrame(8, 47, 58, 13, 5);
+    
+    u8g2.setCursor(82, 56);
+    u8g2.print("работа");
+    u8g2.drawRFrame(78, 47, 32, 13, 5);
+    
+
+    u8g2.sendBuffer();
+}
+
+void drawScaleWindow()
+{
+    u8g2.clearBuffer();
+    drawCap();
+
+    float measure = scale.get_units();
+    D("scale measure: ");
+    D_LN(measure);
+    u8g2.setCursor(40, 50);
+    u8g2.print(measure);
+    u8g2.print('g');
+    
+    u8g2.sendBuffer();
+}
+
+void drawCalibrationWindow()
+{
+    
+}
+
 void drawUnderConstruction()
 {
     u8g2.clearBuffer();
@@ -330,6 +469,43 @@ void checkRelay()
     
     for (int i = 0; i < sizeof(relays) / sizeof(relays[0]); i++)
     {
+        // Ручное управление
+        if (relays[i].manual)
+        {
+            endOfWork = false;
+            
+            if (running)
+            {
+                if (millis() > relays[i].startTime && !relays[i].enabled)
+                {
+                    digitalWrite(relays[i].pin, LOW);
+                    relays[i].enabled = true;
+        
+                    D("relay ");
+                    D(i + 1);
+                    D_LN(" now is working");
+
+                    redrawRequired = true;
+                }
+            }
+            else
+            {
+                if (millis() > relays[i].stopTime && relays[i].enabled)
+                {
+                    digitalWrite(relays[i].pin, HIGH);
+                    relays[i].enabled = false;
+                    relays[i].manual = false;
+        
+                    D("relay ");
+                    D(i + 1);
+                    D_LN(" deactivated");
+
+                    redrawRequired = true;
+                }
+            }
+            continue;
+        }
+        
         // Если реле не задействовано, оно нам не интересно
         if (!relays[i].isReady)
         {
@@ -386,9 +562,19 @@ void redraw()
             break;
 
         case 2:
+            drawManualWindow();
+            break;
+        
         case 3:
+            drawCalibrationQuestion();
+            break;
+            
         case 4:
-            drawUnderConstruction();
+            drawScaleWindow();
+            break;
+
+        case 5:
+            drawCalibrationWindow();
             break;
 
         case 6:
@@ -405,12 +591,28 @@ void redraw()
     }
 }
 
+void initDataFromEEPROM()
+{
+    EEPROM.get(0, scaleParameter);
+    D("scale parameter: ");
+    D_LN(scaleParameter);
+    if (isnan(scaleParameter))
+    {
+        scaleParameter = 1;
+    }
+}
+
 void setup()
 {
     D_INIT();
     
     u8g2.begin();
     u8g2.enableUTF8Print();
+
+    // Инициализация и настройка весов
+    scale.begin(SCALE_DT, SCALE_CLK);
+    initDataFromEEPROM();
+    scale.set_scale(scaleParameter);
 
 //    running = true;
 //    userTimer = -1;
@@ -445,109 +647,144 @@ void setup()
     
 } // void setup()
 
+void useKey(char key)
+{
+    D_LN(key);
+
+    if (0 == currentWindowId)
+    {
+        if ('1' == key || 'A' == key)
+        {
+            currentWindowId = 1;
+            mode = 1;
+            redrawRequired = true;
+        }
+        else if ('2' == key || 'B' == key)
+        {
+            currentWindowId = 1;
+            mode = 2;
+            redrawRequired = true;
+        }
+        else if ('3' == key || 'C' == key)
+        {
+            currentWindowId = 2;
+            mode = 3;
+            redrawRequired = true;
+        }
+        else if ('4' == key || 'D' == key)
+        {
+            currentWindowId = 3;
+            mode = 4;
+            redrawRequired = true;
+        }
+        
+    }
+    else if ('#' == key)
+    {
+        currentWindowId = 0;
+        mode = 0;
+        userTimer = 0;
+        redrawRequired = true;
+        for (int i = 0; i < sizeof(relays) / sizeof(relays[0]); i++)
+        {
+            digitalWrite(relays[i].pin, HIGH);
+            relays[i].enabled = false;
+            relays[i].isReady = false;
+            relays[i].manual = false;
+            relays[i].startTime = 0;
+            relays[i].stopTime = 0;
+        }
+    }
+    else if (1 == currentWindowId)
+    {
+        if (key >= '0' && key <= '9')
+        {
+            int maxTime;
+            if (1 == mode) maxTime = 130;
+            else if (2 == mode) maxTime = 35;
+            
+            if (maxTime == userTimer)
+            {
+                userTimer = 0;
+            }
+            
+            userTimer *= 10;
+            userTimer += key - '0';
+
+            if (userTimer > maxTime)
+            {
+                userTimer = maxTime;
+            }
+            redrawRequired = true;
+        }
+        else if (('A' == key && 1 == mode && userTimer != 0) 
+                || ('B' == key && 2 == mode && userTimer != 0))
+        {
+            unsigned long workTime = (unsigned long)userTimer * (unsigned long)60000;
+            for (int i = 0; i < sizeof(mode1Relays) / sizeof(mode1Relays[0]); i++)
+            {
+                int id = mode1Relays[i];
+                
+                relays[id].isReady = true;
+                relays[id].startTime = millis() + turnOnDelay * (unsigned long) i;
+                relays[id].stopTime = millis() + workTime + turnOffDelay * (unsigned long) i;
+
+                D(id);
+                D("\tisReady: ");
+                D(relays[id].isReady);
+                D("\tstartTime: ");
+                D(relays[id].startTime);
+                D("\tstopTime: ");
+                D_LN(relays[id].stopTime);
+            }
+            
+            currentWindowId = 6;
+            redrawRequired = true;
+            start = millis();
+            running = true;
+        }
+    }
+    else if (2 == currentWindowId)
+    {
+        if ('C' == key)
+        {
+            running = !running;
+            D("3 mode is ");
+            D_LN(running);
+            for (int i = 0; i < sizeof(mode3Relays) / sizeof(mode3Relays[0]); i++)
+            {
+                int id = mode3Relays[i];
+
+                if (running)
+                {
+                    relays[id].manual = true;
+                    relays[id].startTime = millis() + turnOnDelay * (unsigned long) i;
+                }
+                else 
+                {
+                    relays[id].stopTime = millis() + turnOffDelay * (unsigned long) i;
+                }
+                
+                D(id);
+                D("\tisReady: ");
+                D(relays[id].isReady);
+                D("\tstartTime: ");
+                D(relays[id].startTime);
+                D("\tstopTime: ");
+                D_LN(relays[id].stopTime);
+            }
+            
+        }
+    }
+}
+
 void loop()
 {
     // Читаем нажатую клавишу
     char key = keypad.getKey();
     if (key)
     {
-        D_LN(key);
-
-        if (0 == currentWindowId)
-        {
-            if ('1' == key || 'A' == key)
-            {
-                currentWindowId = 1;
-                mode = 1;
-                redrawRequired = true;
-            }
-            else if ('2' == key || 'B' == key)
-            {
-                currentWindowId = 1;
-                mode = 2;
-                redrawRequired = true;
-            }
-            else if ('3' == key || 'C' == key)
-            {
-                currentWindowId = 2;
-                mode = 3;
-                redrawRequired = true;
-            }
-            else if ('4' == key || 'D' == key)
-            {
-                currentWindowId = 3;
-                mode = 4;
-                redrawRequired = true;
-            }
-            
-        }
-        else if ('#' == key)
-        {
-            currentWindowId = 0;
-            mode = 0;
-            userTimer = 0;
-            redrawRequired = true;
-            for (int i = 0; i < sizeof(relays) / sizeof(relays[0]); i++)
-            {
-                digitalWrite(relays[i].pin, HIGH);
-                relays[i].enabled = false;
-                relays[i].isReady = false;
-            }
-        }
-        else if (1 == currentWindowId)
-        {
-            if (key >= '0' && key <= '9')
-            {
-                int maxTime;
-                if (1 == mode) maxTime = 130;
-                else if (2 == mode) maxTime = 35;
-                
-                if (maxTime == userTimer)
-                {
-                    userTimer = 0;
-                }
-                
-                userTimer *= 10;
-                userTimer += key - '0';
-
-                if (userTimer > maxTime)
-                {
-                    userTimer = maxTime;
-                }
-                redrawRequired = true;
-            }
-            else if (('A' == key && 1 == mode && userTimer != 0) 
-                    || ('B' == key && 2 == mode && userTimer != 0))
-            {
-                unsigned long workTime = (unsigned long)userTimer * (unsigned long)60000;
-                for (int i = 0; i < sizeof(mode1Relays) / sizeof(mode1Relays[0]); i++)
-                {
-                    int id = mode1Relays[i];
-                    
-                    relays[id].isReady = true;
-                    relays[id].startTime = millis() + turnOnDelay * (unsigned long) i;
-                    relays[id].stopTime = millis() + workTime + turnOffDelay * (unsigned long) i;
-
-                    D(id);
-                    D("\tisReady: ");
-                    D(relays[id].isReady);
-                    D("\tstartTime: ");
-                    D(relays[id].startTime);
-                    D("\tstopTime: ");
-                    D_LN(relays[id].stopTime);
-                }
-                
-                currentWindowId = 6;
-                redrawRequired = true;
-                start = millis();
-                running = true;
-            }
-//            else if ('B' == key && 2 == mode)
-//            {
-//                currentWindowId = 6;
-//                redrawRequired = true;
-//            }
-        }
+        useKey(key);
     }
 
     int timeLeft = getTimeLeft();

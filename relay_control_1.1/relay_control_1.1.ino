@@ -1,5 +1,6 @@
 #include <U8g2lib.h>
 #include <Keypad.h>
+#include <HX711.h>
 
 struct Relay
 {
