@@ -108,12 +108,24 @@ int currentWindowId = 0;
 // -1 - Автоматический или неавтоматический режим
 // 0 - Выбор режима (1-4)
 // 1 - выбор времени в режиме 1 и 2
-// 2 - режим ручного управление
-// 3 - окно выбора работы с весами
+// 2 - режим ручного управления
+// 3 - выбор работы с весами
+// 4 - калибровка весов
+// 5 - работа с весами
+// 6 - непосредственно работа с режимом 1 или 2
 
 // Режим от 1 до 4.
 // Если mode == 0, все отключено
 int mode = 0;
+
+// Текущий этап калибровки
+int calibrationStep = 0;
+
+// Введенная пользователем масса груза
+long userMass = 0;
+
+// Масса эталонного груза при калибровке по факту
+long actualCalibrationMass = 0;
 
 // Время, которое вводит пользователь в 1 и 2 режиме
 int userTimer = 0;
@@ -130,6 +142,15 @@ int prevTimeLeft = 0;
 
 // Параметр калибровки тензодатчика
 float scaleParameter;
+
+// Коэффициент сглаживания
+const float scaleAlpha = 1;
+
+// Предыдущее значение весов
+float prevScaleValue = 0;
+
+// Идет ли установка значения веса в рабочем 4 режиме
+bool weightSetting = false;
 
 // Последние индексы пикселей дисплея
 const int width = 127;
@@ -159,11 +180,28 @@ void printDataTime()
     u8g2.print("21:10  17.05.19");
 }
 
+// Интеграция экспоненциального сглаживания в измерение веса
+long getScaleValue()
+{
+    float value = scale.get_units(1);
+    prevScaleValue = prevScaleValue + scaleAlpha * (value - prevScaleValue);
+    return (long) prevScaleValue;
+}
+
 int getTimeLeft()
 {
     unsigned long lapsed = millis() - start;
     lapsed /= 1000; // Убираем миллисекунды
     return userTimer * 60 - lapsed;
+}
+
+void toneDone()
+{
+    tone(BUZZER, 1000, 100);
+    delay(200);
+    tone(BUZZER, 1000, 100);
+    delay(200);
+    tone(BUZZER, 1000, 100);
 }
 
 void drawCap()
@@ -191,7 +229,94 @@ void drawModeIcon()
 
 }
 
-void drawDialogWindow()
+void drawWeightView(int x, int y, long value, int padding=5)
+{
+    u8g2.setFont(u8g2_font_6x12_me);
+    String visualValue;
+
+    if (value < 100000000 && value > -10000000)
+    {
+        visualValue = String(value);
+    }
+    else
+    {
+        visualValue = "unknown";
+    }
+
+    int length = visualValue.length();
+    int offset = length * 7 / 2;
+
+    u8g2.setCursor(x + padding + 1 - offset, y + 9 + padding);
+    u8g2.print(visualValue);
+
+    offset = max(offset, 21);
+    u8g2.drawRFrame(x - offset, y, padding * 2 - 5 + offset * 2, 11 + padding * 2, 6);
+
+    u8g2.setFont(u8g2_font_haxrcorp4089_t_cyrillic);
+    u8g2.setDrawColor(0);
+    u8g2.drawLine(x - 14 + padding, y + 10 + padding * 2, x + 13 + padding, y + 10 + padding * 2);
+    u8g2.setDrawColor(1);
+    u8g2.setCursor(x - 13 + padding, y + 13 + padding * 2);
+    u8g2.print("грамм");
+}
+
+void drawRelayIcons(int x, int y, int mode)
+{   
+    for (int i = 0; i < 4; i++)
+    {
+        bool selected;
+        int number;
+        
+        if (3 == mode)
+        {
+            selected = relays[mode3Relays[i]].enabled;
+            number = mode3Relays[i];
+        }
+        else if (4 == mode)
+        {
+            selected = relays[mode4Relays[i]].enabled;
+            number = mode4Relays[i];
+        }
+        else
+        {
+            return;
+        }
+        
+        u8g2.setDrawColor(1);
+
+        int currentX = x + i*12;
+        
+        if (selected)
+        {
+            u8g2.drawDisc(currentX, y - 4, 5, U8G2_DRAW_ALL);
+            u8g2.setDrawColor(0);
+        }
+        else 
+        {
+            u8g2.drawCircle(currentX, y - 4, 5, U8G2_DRAW_ALL);
+        }
+
+        currentX -= 2;
+
+        number += 1;
+
+        // Смещаем расположение цифры 1, 
+        // потому что изначально она стоит криво
+        // из-за толщины символа в 2 пикселя
+        if (1 == number)
+        {
+            currentX++;
+        }
+            
+        u8g2.setCursor(currentX, y);
+        u8g2.print(number);
+        
+//        u8g2.drawRFrame(34 + i*12 - 5, 46, 13, 13, 3);
+    }
+    u8g2.setDrawColor(1);
+}
+
+void drawEnterDialogWindow()
 {
     
 }
@@ -363,43 +488,10 @@ void drawManualWindow()
     u8g2.print("C");
     u8g2.drawRFrame(50, 22, 13, 13, 3);
 
-    int defaultPosition = 25;
 
-    u8g2.setCursor(defaultPosition, 56);
+    u8g2.setCursor(25, 56);
     u8g2.print("Реле");
-    for (int i = 0; i < 4; i++)
-    {
-        bool selected = relays[mode3Relays[i]].enabled;
-        u8g2.setDrawColor(1);
-        
-        if (selected)
-        {
-            u8g2.drawDisc(defaultPosition + 32 + i*12, 52, 5, U8G2_DRAW_ALL);
-            u8g2.setDrawColor(0);
-        }
-        else 
-        {
-            u8g2.drawCircle(defaultPosition + 32 + i*12, 52, 5, U8G2_DRAW_ALL);
-        }
-
-        int x = defaultPosition + 30 + i*12;
-        int number = mode3Relays[i] + 1;
-
-        // Смещаем расположение цифры 1, 
-        // потому что изначально она стоит криво
-        // из-за толщины символа в 2 пикселя
-        if (1 == number)
-        {
-            x++;
-        }
-
-        
-        u8g2.setCursor(x, 56);
-        u8g2.print(number);
-        
-//        u8g2.drawRFrame(34 + i*12 - 5, 46, 13, 13, 3);
-    }
-    u8g2.setDrawColor(1);
+    drawRelayIcons(65, 56, 3);
 
     u8g2.sendBuffer();
 }
@@ -410,20 +502,33 @@ void drawCalibrationQuestion()
     drawCap();
     drawModeIcon();
 
-    u8g2.setFont(u8g2_font_haxrcorp4089_t_cyrillic);
+    long value = getScaleValue();
+    drawWeightView(34, 16, value);
 
-//    float 
-//    u8g2.setCursor(4, 20);
+    D("Значение тензодатчика: ");
+    D_LN(value);
 
-
-    u8g2.setCursor(12, 56);
+    u8g2.setCursor(16, 56);
     u8g2.print("калибровка");
-    u8g2.drawRFrame(8, 47, 58, 13, 5);
+    u8g2.drawRFrame(1, 46, 69, 15, 6);
+    u8g2.drawDisc(8, 53, 5, U8G2_DRAW_ALL);
+    u8g2.drawCircle(8, 53, 7, U8G2_DRAW_UPPER_LEFT);
+    u8g2.drawCircle(8, 53, 7, U8G2_DRAW_LOWER_LEFT);
     
-    u8g2.setCursor(82, 56);
+    
+    u8g2.setCursor(88, 56);
     u8g2.print("работа");
-    u8g2.drawRFrame(78, 47, 32, 13, 5);
-    
+    u8g2.drawRFrame(73, 46, 50, 15, 6);
+    u8g2.drawDisc(80, 53, 5, U8G2_DRAW_ALL);
+    u8g2.drawCircle(80, 53, 7, U8G2_DRAW_UPPER_LEFT);
+    u8g2.drawCircle(80, 53, 7, U8G2_DRAW_LOWER_LEFT);
+
+    u8g2.setDrawColor(0);
+    u8g2.setCursor(6, 57);
+    u8g2.print("C");
+    u8g2.setCursor(78, 57);
+    u8g2.print("D");
+    u8g2.setDrawColor(1);
 
     u8g2.sendBuffer();
 }
@@ -433,20 +538,83 @@ void drawScaleWindow()
     u8g2.clearBuffer();
     drawCap();
 
-    float measure = scale.get_units();
-    D("scale measure: ");
-    D_LN(measure);
-    u8g2.setCursor(40, 50);
-    u8g2.print(measure);
-    u8g2.print('g');
+    drawModeIcon();
+
+    u8g2.setFont(u8g2_font_haxrcorp4089_t_cyrillic);
+
+    if (weightSetting)
+    {
+        u8g2.setCursor(16, 17);
+        u8g2.print("Введите");
+        u8g2.setCursor(5, 26);
+        u8g2.print("необходимую");
+        u8g2.setCursor(6, 35);
+        u8g2.print("массу груза:");
+    
+        drawWeightView(34, 40, userMass, 3);
+    }
+    else
+    {
+        long current = getScaleValue();
+        
+        drawWeightView(31, 41, userMass, 4);
+        drawWeightView(94, 41, current, 4);
+
+        u8g2.setCursor(8, 39);
+        u8g2.print("Задано:");
+
+        
+        drawRelayIcons(12, 26, 4);
+    }
     
     u8g2.sendBuffer();
 }
 
 void drawCalibrationWindow()
 {
+    u8g2.clearBuffer();
+    drawCap();
+
+    u8g2.setFont(u8g2_font_haxrcorp4089_t_cyrillic);
     
+    u8g2.setCursor(1, 17);
+    u8g2.print("Калибровка");
+
+    if (0 == calibrationStep)
+    {
+        u8g2.setCursor(25, 35);
+        u8g2.print("Освободите весы,");
+
+        u8g2.setCursor(20, 49);
+        u8g2.print("затем нажмите");
+        u8g2.setCursor(96, 50);
+        u8g2.print("D");
+    }
+    else if (1 == calibrationStep)
+    {
+        u8g2.setCursor(28, 32);
+        u8g2.print("Положите груз");
+
+        u8g2.setCursor(25, 43);
+        u8g2.print("известной массы,");
+        
+        u8g2.setCursor(20, 54);
+        u8g2.print("затем нажмите");
+        u8g2.setCursor(96, 55);
+        u8g2.print("D");
+    }
+    else if (2 == calibrationStep)
+    {
+        u8g2.setCursor(20, 32);
+        u8g2.print("Введите массу груза:");
+
+        u8g2.setCursor(30, 46);
+        u8g2.print(userMass);
+    }
+
+    u8g2.sendBuffer();
 }
+
 
 void drawUnderConstruction()
 {
@@ -463,6 +631,49 @@ void drawUnderConstruction()
     u8g2.sendBuffer();
 }
 
+void checkWeight()
+{
+    long currentWeight = getScaleValue();
+
+    if (currentWeight >= userMass && !running)
+    {
+        running = true;
+    }
+    else if (currentWeight < userMass && running)
+    {
+        running = false;
+    }
+    else
+    {
+        return;
+    }
+
+    D("4 mode is ");
+    D_LN(running);
+    for (int i = 0; i < sizeof(mode4Relays) / sizeof(mode4Relays[0]); i++)
+    {
+        int id = mode4Relays[i];
+
+        if (running)
+        {
+            relays[id].manual = true;
+            relays[id].startTime = millis() + turnOnDelay * (unsigned long) i;
+        }
+        else 
+        {
+            relays[id].stopTime = millis() + turnOffDelay * (unsigned long) i;
+        }
+        
+        D(id);
+        D("\tisReady: ");
+        D(relays[id].isReady);
+        D("\tstartTime: ");
+        D(relays[id].startTime);
+        D("\tstopTime: ");
+        D_LN(relays[id].stopTime);
+    }
+}
+
 void checkRelay()
 {
     bool endOfWork = true;
@@ -472,10 +683,9 @@ void checkRelay()
         // Ручное управление
         if (relays[i].manual)
         {
-            endOfWork = false;
-            
             if (running)
             {
+                endOfWork = false;
                 if (millis() > relays[i].startTime && !relays[i].enabled)
                 {
                     digitalWrite(relays[i].pin, LOW);
@@ -484,7 +694,7 @@ void checkRelay()
                     D("relay ");
                     D(i + 1);
                     D_LN(" now is working");
-
+                    
                     redrawRequired = true;
                 }
             }
@@ -499,8 +709,16 @@ void checkRelay()
                     D("relay ");
                     D(i + 1);
                     D_LN(" deactivated");
-
+                    
                     redrawRequired = true;
+
+                    // <КОСТЫЛЬ!!!>
+                    if (7 == i && 5 == currentWindowId)
+                    {
+                        redraw();
+                        toneDone();
+                    }
+                    // </КОСТЫЛЬ!!!>
                 }
             }
             continue;
@@ -540,10 +758,12 @@ void checkRelay()
         }
     }
 
-    if (endOfWork)
+    if (running && endOfWork)
     {
         running = false;
         redrawRequired = true;
+        
+        toneDone();
     }
 }
 
@@ -553,6 +773,10 @@ void redraw()
     
     switch(currentWindowId)
     {
+        case -1:
+            drawEnterDialogWindow();
+            break;
+            
         case 0:
             drawStartWindow();
             break;
@@ -570,11 +794,11 @@ void redraw()
             break;
             
         case 4:
-            drawScaleWindow();
+            drawCalibrationWindow();
             break;
 
         case 5:
-            drawCalibrationWindow();
+            drawScaleWindow();
             break;
 
         case 6:
@@ -604,6 +828,8 @@ void initDataFromEEPROM()
 
 void setup()
 {
+    pinMode(BUZZER, OUTPUT);
+    
     D_INIT();
     
     u8g2.begin();
@@ -681,10 +907,12 @@ void useKey(char key)
     }
     else if ('#' == key)
     {
+        tone(BUZZER, 200, 30);
         currentWindowId = 0;
+        redrawRequired = true;
         mode = 0;
         userTimer = 0;
-        redrawRequired = true;
+        userMass = 0;
         for (int i = 0; i < sizeof(relays) / sizeof(relays[0]); i++)
         {
             digitalWrite(relays[i].pin, HIGH);
@@ -713,13 +941,25 @@ void useKey(char key)
 
             if (userTimer > maxTime)
             {
+                drawSelectTimeWindow(mode);
+                tone(BUZZER, 170, 80);
+                delay(160);
+                tone(BUZZER, 170, 80);
                 userTimer = maxTime;
             }
             redrawRequired = true;
         }
-        else if (('A' == key && 1 == mode && userTimer != 0) 
-                || ('B' == key && 2 == mode && userTimer != 0))
+        else if (('A' == key && 1 == mode) 
+                || ('B' == key && 2 == mode))
         {
+            if (0 == userTimer)
+            {
+                tone(BUZZER, 170, 80);
+                delay(160);
+                tone(BUZZER, 170, 80);
+                return;
+            }
+            
             unsigned long workTime = (unsigned long)userTimer * (unsigned long)60000;
             for (int i = 0; i < sizeof(mode1Relays) / sizeof(mode1Relays[0]); i++)
             {
@@ -776,6 +1016,72 @@ void useKey(char key)
             
         }
     }
+    else if (3 == currentWindowId)
+    {
+        if ('C' == key)
+        {
+            currentWindowId = 4;
+            redrawRequired = true;
+        }
+        else if ('D' == key)
+        {
+            currentWindowId = 5;
+            weightSetting = true;
+            redrawRequired = true;
+        }
+    }
+    else if (4 == currentWindowId)
+    {
+        if ('D' == key)
+        {
+            if (0 == calibrationStep)
+            {
+                calibrationStep = 1;
+                redrawRequired = true;
+
+                scale.set_scale();
+                scale.tare();
+            }
+            else if (1 == calibrationStep)
+            {
+                calibrationStep = 2;
+                redrawRequired = true;
+
+                actualCalibrationMass = scale.get_units(10);
+            }
+            else if (2 == calibrationStep)
+            {
+                currentWindowId = 3;
+                calibrationStep = 0;
+                redrawRequired = true;
+
+                float parameter = actualCalibrationMass / userMass;
+                scale.set_scale(parameter);
+
+                userMass = 0;
+            }
+        }
+        else if (key >= '0' && key <= '9' && 2 == calibrationStep)
+        {
+            userMass *= 10;
+            userMass += key - '0';
+            redrawRequired = true;
+        }
+    }
+    else if (5 == currentWindowId)
+    {
+        if (key >= '0' && key <= '9' && weightSetting)
+        {
+            userMass *= 10;
+            userMass += key - '0';
+            redrawRequired = true;
+        }
+        else if ('D' == key)
+        {
+            weightSetting = false;
+            redrawRequired = true;
+        }
+    }
 }
 
 void loop()
@@ -787,13 +1093,25 @@ void loop()
         useKey(key);
     }
 
+    // Распихиваем проверки на необходимость отрисовки дисплея
+    // в разные блоки, чтобы не нагромождать код
     int timeLeft = getTimeLeft();
-    if (timeLeft != prevTimeLeft && running)
+    if (timeLeft != prevTimeLeft && (running || timeLeft >= -2 && timeLeft <= 0))
+    {
+        redrawRequired = true;
+    }
+    else if (3 == currentWindowId ||
+                5 == currentWindowId)
     {
         redrawRequired = true;
     }
 
     checkRelay();
+
+    if (5 == currentWindowId && !weightSetting)
+    {
+        checkWeight();
+    }
 
     if (redrawRequired)
     {
@@ -801,8 +1119,9 @@ void loop()
     }
     else
     {
-        delay(10);
+        delay(2);
     }
     prevTimeLeft = timeLeft;
     
 } // void loop()
+
