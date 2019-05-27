@@ -94,8 +94,8 @@ Relay relays[8] =
     Relay(RELAY8)
 };
 
-int mode1Relays[4] = {0, 1, 0, 6};
-int mode2Relays[4] = {0, 1, 0, 7};
+int mode1Relays[4] = {0, 1, 3, 6};
+int mode2Relays[4] = {0, 1, 2, 6};
 int mode3Relays[4] = {0, 3, 4, 6};
 int mode4Relays[4] = {0, 1, 5, 7};
 
@@ -679,13 +679,13 @@ void checkWeight()
 {
     long currentWeight = getScaleValue();
 
-    if (currentWeight >= userMass && !running)
-    {
-        running = true;
-    }
-    else if (currentWeight < userMass && running)
+    if (currentWeight >= userMass && running)
     {
         running = false;
+    }
+    else if (currentWeight < userMass && !running)
+    {
+        running = true;
     }
     else
     {

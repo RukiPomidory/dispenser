@@ -1,8 +1,10 @@
-#include <U8g2lib.h>
-#include <Keypad.h>
-#include <HX711.h>
-#include <EEPROM.h>
+#include <U8g2lib.h>        // Дисплей
+#include <Keypad.h>         // 4*4 клавиатура
+#include <HX711.h>          // Тензодатчик
+#include <EEPROM.h>         // Долговременная память
+#include <iarduino_RTC.h>   // Часы реального времени
 
+// Структура управления реле
 struct Relay
 {
     Relay(int pin) 
@@ -67,6 +69,7 @@ const bool relayTestRequired = false;
 #define ROWS 4
 #define COLS 4
 
+// Пищалка
 #define BUZZER 3
 
 // Реле
@@ -79,9 +82,11 @@ const bool relayTestRequired = false;
 #define RELAY7  37
 #define RELAY8  38
 
+// Контакты тензодатчика
 #define SCALE_DT 49
 #define SCALE_CLK 48
 
+// Массив объектов всех реле
 Relay relays[8] = 
 {
     Relay(RELAY1),
@@ -94,14 +99,23 @@ Relay relays[8] =
     Relay(RELAY8)
 };
 
-int mode1Relays[4] = {0, 1, 0, 6};
-int mode2Relays[4] = {0, 1, 0, 7};
+// Список реле для каждого режима
+int mode1Relays[4] = {0, 1, 2, 6};
+int mode2Relays[4] = {0, 1, 2, 6};
 int mode3Relays[4] = {0, 3, 4, 6};
 int mode4Relays[4] = {0, 1, 5, 7};
 
 
 // Время последнего запуска
 unsigned long start;
+
+// Время последней отрисовки
+unsigned long lastRedraw;
+
+// Интервал времени обязательной отрисовки в миллисекундах.
+// При бездействии системы дисплей будет обновляться с этой периодичностью,
+// чтобы "шапка" с датой и временем обновлялась
+const unsigned long redrawInterval = 10000;
 
 // Номер текущего окна
 int currentWindowId = -1;
@@ -156,13 +170,13 @@ bool weightSetting = false;
 const int width = 127;
 const int height = 63;
 
+// Параметры клавиатуры
 char keys[ROWS][COLS] = {
   {'1','2','3','A'},
   {'4','5','6','B'},
   {'7','8','9','C'},
   {'*','0','#','D'}
 }; 
-
 byte rowPins[ROWS] = {11,10, 9, 8}; 
 byte colPins[COLS] = {7, 6, 5, 4}; 
 
@@ -175,10 +189,17 @@ U8G2_ST7920_128X64_F_HW_SPI u8g2(U8G2_R0, 10);
 // Объект весов на тензодатчике и преобразователе hx711
 HX711 scale;
 
+// Часы реального времени. Модель и подключаемые пины
+// модель, RST, CLK, DAT
+iarduino_RTC rtc(RTC_DS1302, 22, 23, 24);
+
+// Вывод времени в шапку
 void printDataTime()
 {
-    u8g2.print("21:10  17.05.19");
-}
+    u8g2.setFont(u8g2_font_profont11_tn);
+    u8g2.print(rtc.gettime("H:i  d.m.y"));
+    
+} // void printDataTime()
 
 // Интеграция экспоненциального сглаживания в измерение веса
 long getScaleValue()
@@ -186,15 +207,19 @@ long getScaleValue()
     float value = scale.get_units(1);
     prevScaleValue = prevScaleValue + scaleAlpha * (value - prevScaleValue);
     return (long) prevScaleValue;
-}
+    
+} // long getScaleValue()
 
+// Возвращает оставшееся время для 1 и 2 режима
 int getTimeLeft()
 {
     unsigned long lapsed = millis() - start;
     lapsed /= 1000; // Убираем миллисекунды
     return userTimer * 60 - lapsed;
-}
+    
+} // int getTimeLeft()
 
+// Звук положительного подкрепления
 void toneDone()
 {
     tone(BUZZER, 1000, 100);
@@ -202,8 +227,10 @@ void toneDone()
     tone(BUZZER, 1000, 100);
     delay(200);
     tone(BUZZER, 1000, 100);
-}
+    
+} // void toneDone()
 
+// Вывод шапки на дисплей
 void drawCap()
 {
     u8g2.setFont(u8g2_font_profont11_tn);
@@ -211,10 +238,9 @@ void drawCap()
     printDataTime();
     u8g2.drawLine(0, 8, width, 8);
     
-//    u8g2.drawLine(width / 2, 0, width / 2, height);
-//    u8g2.drawLine(width / 2 + 1, 0, width / 2 + 1, height);
-}
+} // void drawCap()
 
+// Вывод иконки режима на дисплей
 void drawModeIcon()
 {
     // Иконка "режим"
@@ -223,12 +249,14 @@ void drawModeIcon()
     u8g2.setCursor(77, 28);
     u8g2.print("Режим");
 
+    // Номер режима поверх нижней стороны
     u8g2.setFont(u8g2_font_t0_16_me);
     u8g2.setCursor(92, 41);
     u8g2.print(mode);
+    
+} // void drawModeIcon()
 
-}
-
+// Вывод элемента контроля веса на дисплей
 void drawWeightView(int x, int y, long value, int padding=5)
 {
     u8g2.setFont(u8g2_font_6x12_me);
@@ -258,8 +286,15 @@ void drawWeightView(int x, int y, long value, int padding=5)
     u8g2.setDrawColor(1);
     u8g2.setCursor(x - 13 + padding, y + 13 + padding * 2);
     u8g2.print("грамм");
-}
+    
+} // void drawWeightView(int x, int y, long value, int padding=5)
 
+// Вывод иконок реле на дисплей
+/*
+ *  int x - координата x угла
+ *  int y - координата y угла
+ *  int mode - текущий режим, для которого отображаются реле
+ */
 void drawRelayIcons(int x, int y, int mode)
 {   
     for (int i = 0; i < 4; i++)
@@ -310,12 +345,12 @@ void drawRelayIcons(int x, int y, int mode)
             
         u8g2.setCursor(currentX, y);
         u8g2.print(number);
-        
-//        u8g2.drawRFrame(34 + i*12 - 5, 46, 13, 13, 3);
     }
     u8g2.setDrawColor(1);
-}
+    
+} // void drawRelayIcons(int x, int y, int mode)
 
+// Окно приветствия
 void drawEnterDialogWindow()
 {
     u8g2.clearBuffer();
@@ -346,8 +381,10 @@ void drawEnterDialogWindow()
     u8g2.drawCircle(65, 51, 9);
 
     u8g2.sendBuffer();
-}
+    
+} // void drawEnterDialogWindow()
 
+// Окно выбора режима 1-4
 void drawStartWindow()
 {
     u8g2.clearBuffer();
@@ -380,10 +417,11 @@ void drawStartWindow()
     u8g2.setCursor(36, 62);
     u8g2.print("Управление весом");
     
-
     u8g2.sendBuffer();
-}
+    
+} // void drawStartWindow()
 
+// Вывод оставшегося времени в режимах 1-2
 void printUserTimer()
 {
     int len = 1;
@@ -395,10 +433,10 @@ void printUserTimer()
     u8g2.setFont(u8g2_font_9x15_tf);
     u8g2.setCursor(40 - (int) (len * 4.5), 57);
     u8g2.print(userTimer);
-//    u8g2.setFont();
-//    u8g2.print(" мин.");
-}
+    
+} // void printUserTimer()
 
+// Окно выбора времени для режимов 1-2
 void drawSelectTimeWindow(byte mode)
 {
     u8g2.clearBuffer();
@@ -438,8 +476,10 @@ void drawSelectTimeWindow(byte mode)
     printUserTimer();
 
     u8g2.sendBuffer();
-}
+    
+} // void drawSelectTimeWindow(byte mode)
 
+// Окно контроля за происходящим в режимах 1-2
 void drawControlWindow(byte mode)
 {
     u8g2.clearBuffer();
@@ -506,8 +546,10 @@ void drawControlWindow(byte mode)
     }
 
     u8g2.sendBuffer();
-}
+    
+} // void drawControlWindow(byte mode)
 
+// Окно работы 3 режима
 void drawManualWindow()
 {
     u8g2.clearBuffer();
@@ -539,8 +581,10 @@ void drawManualWindow()
     drawRelayIcons(65, 56, 3);
 
     u8g2.sendBuffer();
-}
+    
+} // void drawManualWindow()
 
+// Окно приветствия 3 режима
 void drawCalibrationQuestion()
 {
     u8g2.clearBuffer();
@@ -576,8 +620,10 @@ void drawCalibrationQuestion()
     u8g2.setDrawColor(1);
 
     u8g2.sendBuffer();
-}
+    
+} // void drawCalibrationQuestion()
 
+// Окно выбора нагрузки в 3 режиме
 void drawScaleWindow()
 {
     u8g2.clearBuffer();
@@ -613,8 +659,9 @@ void drawScaleWindow()
     }
     
     u8g2.sendBuffer();
-}
+} // void drawScaleWindow()
 
+// Окно калибровки тензодатчика
 void drawCalibrationWindow()
 {
     u8g2.clearBuffer();
@@ -658,8 +705,10 @@ void drawCalibrationWindow()
     }
 
     u8g2.sendBuffer();
-}
+    
+} // void drawCalibrationWindow()
 
+// Окно "в разработке"
 void drawUnderConstruction()
 {
     u8g2.clearBuffer();
@@ -673,19 +722,22 @@ void drawUnderConstruction()
     u8g2.print("В РАЗРАБОТКЕ");
     
     u8g2.sendBuffer();
-}
+    
+} // void drawUnderConstruction()
 
+// Проверка нагрузки на тензодатчик
+// и соответствующая реакция реле
 void checkWeight()
 {
     long currentWeight = getScaleValue();
 
-    if (currentWeight >= userMass && !running)
-    {
-        running = true;
-    }
-    else if (currentWeight < userMass && running)
+    if (currentWeight >= userMass && running)
     {
         running = false;
+    }
+    else if (currentWeight < userMass && !running)
+    {
+        running = true;
     }
     else
     {
@@ -716,8 +768,9 @@ void checkWeight()
         D("\tstopTime: ");
         D_LN(relays[id].stopTime);
     }
-}
+} // void checkWeight()
 
+// Проверка всех реле в системе
 void checkRelay()
 {
     bool endOfWork = true;
@@ -811,9 +864,11 @@ void checkRelay()
     }
 }
 
+// Отрисовка текущего окна в текущем режиме
 void redraw()
 {
     redrawRequired = false;
+    lastRedraw = millis();
     
     switch(currentWindowId)
     {
@@ -857,8 +912,9 @@ void redraw()
             redrawRequired = true;
             break;
     }
-}
+} // void redraw()
 
+// Инициализация всех параметров из долгосрочной памяти
 void initDataFromEEPROM()
 {
     float offset;
@@ -881,15 +937,18 @@ void initDataFromEEPROM()
 
     scale.set_scale(scaleParameter);
     scale.set_offset(offset);
-}
+    
+} // void initDataFromEEPROM()
 
+// Сохранение всех параметров в долгосрочную память
 void saveDataToEEPROM()
 {
     EEPROM.put(0, scaleParameter);
     float offset = scale.get_offset();
     EEPROM.put(sizeof(scaleParameter), offset);
-}
+} // void saveDataToEEPROM()
 
+// Обработка нажатия кнопки на клавиатуре
 void useKey(char key)
 {
     D_LN(key);
@@ -1135,11 +1194,14 @@ void useKey(char key)
             redrawRequired = true;
         }
     }
-}
+} // void useKey(char key)
 
 void setup()
 {
+    delay(300);
+    
     pinMode(BUZZER, OUTPUT);
+    tone(BUZZER, 1300, 300);
     
     D_INIT();
     
@@ -1149,6 +1211,8 @@ void setup()
     // Инициализация и настройка весов
     scale.begin(SCALE_DT, SCALE_CLK);
     initDataFromEEPROM();
+
+    rtc.begin();
     
     for (int i = 0; i < sizeof(relays) / sizeof(relays[0]); i++)
     {
@@ -1194,6 +1258,10 @@ void loop()
     {
         redrawRequired = true;
     }
+    else if (millis() - lastRedraw > redrawInterval)
+    {
+        redrawRequired = true;
+    }
 
     checkRelay();
 
@@ -1208,7 +1276,7 @@ void loop()
     }
     else
     {
-        delay(2);
+        delay(5);
     }
     prevTimeLeft = timeLeft;
     
